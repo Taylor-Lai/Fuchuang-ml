@@ -45,7 +45,7 @@ router_prompt = ChatPromptTemplate.from_messages([
     ("system", """你是一个流量分发路由器。请将用户指令精确分类到以下 4 个处理流：
     1. "format": 文档排版、修改格式。
     2. "extract": 信息提取、找数据入库。
-    3. "fill_table": 填写表格、生成报表。
+    3. "fill_table": 填写表格、跨表汇总数据、Excel 处理（此路径将触发高级技能引擎）。
     4. "chat": 闲聊或无法识别的指令。
     
     你必须严格按照以下 JSON 格式输出，不要多说任何其他内容：

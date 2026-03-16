@@ -1,46 +1,38 @@
 from langchain_core.messages import HumanMessage
 from agent import app
-import sys
-
-# 假设这是某个特定任务的全局唯一 ID
-# 只要 thread_id 不变，Agent 永远能从数据库里找回它的记忆
-config = {"configurable": {"thread_id": "a23_task_001"}}
+import time
+import uuid  # 引入随机ID生成库
 
 
-def start_task():
-    print("\n[系统] 接收到前端新任务，正在拉起 Agent...")
-    initial_state = {"messages": [HumanMessage(content="把昨天的会议纪要关键数据提取一下存进数据库。")]}
+def run_test(query: str, thread_id: str):
+    print(f"\n\n{'=' * 70}")
+    print(f"🧑‍💻 用户指令: {query}")
+    print(f"{'=' * 70}")
 
-    # 第一次运行：它跑到断点就会把状态写入 SQLite 然后挂起
+    config = {"configurable": {"thread_id": thread_id}}
+    initial_state = {"messages": [HumanMessage(content=query)]}
+
     for event in app.stream(initial_state, config, stream_mode="values"):
-        pass
-
-    state = app.get_state(config)
-    if state.next:
-        print(f"\n⏸️ [程序已挂起] Agent 已停止运行，数据已持久化到 SQLite。")
-        print("💡 你现在可以按 Ctrl+C 彻底关闭这个 Python 脚本！")
-        print("💡 假设过了 3 个小时，老板终于在前端点击了'确认'，请运行: python main.py resume")
-
-
-def resume_task():
-    print("\n[系统] 收到网关的恢复执行信号，正在从 SQLite 唤醒 Agent...")
-    state = app.get_state(config)
-
-    if not state.next:
-        print("❌ 没有找到被挂起的任务，或者任务已经执行完毕。")
-        return
-
-    print(f"✅ 成功找回历史状态！即将执行节点: {state.next[0]}")
-    print("▶️ [恢复执行] 人类已授权，继续跑完剩下的流程...\n")
-
-    # 传入 None 触发继续执行
-    for event in app.stream(None, config, stream_mode="values"):
-        if event["messages"][-1].type == "ai" and not event["messages"][-1].tool_calls:
-            print(f"\n🤖 Agent 最终回复: {event['messages'][-1].content}")
+        last_message = event["messages"][-1]
+        if last_message.type == "ai" and not last_message.tool_calls:
+            print(f"\n🤖 Agent 最终回复:\n{last_message.content}")
 
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == "resume":
-        resume_task()
-    else:
-        start_task()
+    # 【核心改动】：每次测试使用全新的随机 Thread ID，避免读取到上一次崩溃的坏死记忆！
+    fresh_thread_id_1 = str(uuid.uuid4())
+    fresh_thread_id_2 = str(uuid.uuid4())
+
+    print("\n>>> 场景一：初次面临全新的财务报表汇总任务 <<<")
+    run_test(
+        "帮我把《2026年Q1华东区销售明细.xlsx》里的数据，按产品类别汇总求和，填入《年度利润统计模板.xlsx》",
+        thread_id=fresh_thread_id_1
+    )
+
+    print("\n\n>>> 场景二：下个月，再次面临同类汇总任务 <<<")
+    # 为了演示技能复用，这里传入与场景一相同的 thread_id 也是可以的，
+    # 但我们为了严谨证明技能库生效，即使开启全新对话(fresh_thread_id_2)，它也能从 SQLite 技能库中读到刚才学过的技能！
+    run_test(
+        "小助手，帮我把《2026年Q2华东区销售明细.xlsx》的数据，也按产品类别汇总填入《年度利润统计模板.xlsx》",
+        thread_id=fresh_thread_id_2
+    )
