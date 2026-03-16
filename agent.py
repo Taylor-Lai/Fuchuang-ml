@@ -11,7 +11,7 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 import sqlite3
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.messages import AIMessage
+
 
 # 导入你写好的工具
 from tools import agent_tools

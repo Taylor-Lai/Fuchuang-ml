@@ -1,0 +1,7 @@
+{
+  "dependencies": ["."],
+  "graphs": {
+    "a23_core_agent": "./agent.py:app"
+  },
+  "env": ".env"
+}

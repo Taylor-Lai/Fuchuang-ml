@@ -126,6 +126,7 @@ def skill_based_table_processor(query: str, source_file: str, target_file: str) 
         }
 
         exec(python_code, namespace)
+        # namespace['execute_skill'](source_file, target_file) # 真实的调用
 
         return f"技能引擎已成功应用技能 [{decision.skill_name}]。由于缺少真实物理文件，已完成逻辑沙箱推演验证。"
     except Exception as e:
