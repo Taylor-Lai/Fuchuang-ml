@@ -11,7 +11,7 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 import sqlite3
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.messages import AIMessage
+
 
 # 导入你写好的工具
 from tools import agent_tools
@@ -42,11 +42,12 @@ llm = ChatOpenAI(
 llm_with_tools = llm.bind_tools(agent_tools)
 
 router_prompt = ChatPromptTemplate.from_messages([
-    ("system", """你是一个流量分发路由器。请将用户指令精确分类到以下 4 个处理流：
+    ("system", """你是一个流量分发路由器。请将用户指令精确分类到以下 5 个处理流：
     1. "format": 文档排版、修改格式。
     2. "extract": 信息提取、找数据入库。
-    3. "fill_table": 填写表格、跨表汇总数据、Excel 处理（此路径将触发高级技能引擎）。
-    4. "chat": 闲聊或无法识别的指令。
+    3. "fill_table": 填写表格、跨表汇总数据、Excel 处理。
+    4. "kg_qa": 业务知识问答（如询问项目进度、人员关系、制度细节等）。
+    5. "chat": 闲聊或无法识别的指令。
     
     你必须严格按照以下 JSON 格式输出，不要多说任何其他内容：
     {{
@@ -86,10 +87,10 @@ def reasoning_node(state: AgentState):
 # 4. 定义路由条件 (Edges)
 # ==========================================
 def route_after_intent(state: AgentState) -> str:
-    """根据意图，决定下一步去哪"""
-    if state["intent"] == "chat":
-        return "chat_end" # 闲聊直接结束
-    return "reasoning" # 其他业务指令，进入思考和工具调用
+    intent = state["intent"]
+    if intent in ["format", "extract", "fill_table", "kg_qa"]: # 加上了 kg_qa
+        return "reasoning"
+    return END
 
 def route_after_reasoning(state: AgentState) -> str:
     """如果大模型决定用工具，就去执行；否则结束"""

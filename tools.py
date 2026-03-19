@@ -3,6 +3,8 @@ from pydantic import BaseModel, Field
 from skill_manager import get_all_skills, get_skill_code, save_new_skill
 from langchain_openai import ChatOpenAI
 import os
+import sqlite3
+from local_kg_engine import search_knowledge_graph # 导入本地图谱引擎
 
 @tool
 def format_document_tool(instruction: str, doc_name: str) -> str:
@@ -34,6 +36,21 @@ def extract_info_tool(target_entities: str, doc_name: str) -> str:
     # 这里未来会替换成 B 同学写的 RAG + 实体抽取代码
     return f"已成功从 '{doc_name}' 提取数据: {{'提取结果': '张三报销5000元'}}, 并且已准备好入库。"
 
+# 🌟 新增：本地知识图谱检索工具
+@tool
+def knowledge_graph_tool(query_entity: str) -> str:
+    """
+    【核心知识库检索】
+    当用户询问复杂的业务事实、项目背景、人员关系、规章制度等问题时调用此工具。
+    参数:
+        query_entity: 你从用户问题中提取出的核心实体名称。
+    """
+    print(f"\n🕸️ [调用本地图谱] 正在查询实体: {query_entity}")
+    try:
+        result = search_knowledge_graph(entity=query_entity)
+        return result
+    except Exception as e:
+        return f"图谱查询发生异常: {str(e)}"
 
 class SkillDecision(BaseModel):
     action: str = Field(..., description="填 'use_existing' (使用现有技能) 或 'generate_new' (生成新技能)")
@@ -107,30 +124,39 @@ def skill_based_table_processor(query: str, source_file: str, target_file: str) 
         save_new_skill(decision.skill_name, query, python_code)
         print(f"💾 [记忆保存] 新技能已永久保存入库！")
 
-    # 5. 在受控沙箱内执行 Python 代码 (MVP版本使用 exec)
-    print("\n⚙️ [沙箱执行] 正在运行技能代码...")
+    print("\n⚙️ [沙箱执行] 正在注入真实物理数据与 DB 权限并运行代码...")
     try:
-        # 定义安全的执行命名空间
         import pandas as pd
-        safe_builtins = {
-            'print': print,
-            'range': range,
-            'len': len,
-            'int': int,
-            'str': str,
-            # 禁用 open, eval, exec, __import__ 等危险函数
-        }
-        namespace = {
-            '__builtins__': safe_builtins,
-            'pd': pd  # 只把必要的库注入给大模型
-        }
 
+        # 🔥 核心升级：打开企业核心数据库的连接
+        # 注意：这里假设你本地有一个 enterprise_data.db 存放了提取出的非结构化数据
+        db_conn = sqlite3.connect('enterprise_data.db')
+
+        # 把 pandas 和 数据库连接 一并注入无菌手术台
+        namespace = {'pd': pd, 'db_conn': db_conn}
+
+        # 编译大模型写的代码
         exec(python_code, namespace)
 
-        return f"技能引擎已成功应用技能 [{decision.skill_name}]。由于缺少真实物理文件，已完成逻辑沙箱推演验证。"
+        if 'execute_skill' not in namespace:
+            return "执行失败：代码中未包含 execute_skill 函数。"
+
+        func_to_run = namespace['execute_skill']
+
+        # 真正调用函数
+        result = func_to_run(source_file, target_file)
+
+        print(f"✅ [执行成功] 底层返回: {result}")
+        return f"技能执行成功！反馈是：{result}"
+
     except Exception as e:
-        return f"技能执行期间发生异常，可能需要调整指令：{str(e)}"
+        print(f"❌ [执行报错] {str(e)}")
+        return f"执行异常：{str(e)}"
+    finally:
+        # 记得关闭数据库连接
+        if 'db_conn' in locals():
+            db_conn.close()
 
 
 # 导出工具给路由主图使用
-agent_tools = [format_document_tool, extract_info_tool, skill_based_table_processor]
+agent_tools = [format_document_tool, extract_info_tool, skill_based_table_processor, knowledge_graph_tool]

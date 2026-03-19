@@ -1,6 +1,4 @@
-# skill_manager.py
 import sqlite3
-import json
 
 DB_PATH = "enterprise_skills.db"
 
