@@ -1,14 +1,23 @@
-from pathlib import Path
-from typing import List
-import re
+﻿from pathlib import Path
+from typing import Dict, List, Tuple
+import base64
+import hashlib
+
 from docx import Document
-from docx.oxml.ns import qn
+
 from .base import DocumentChunk
+
+W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+
 
 class DocxParser:
     """
-    Word 文档解析器。
-    策略：按标题段落（Heading样式）切分，表格单独提取为一个 chunk。
+    Word parser.
+    Strategy:
+    - Split by heading paragraphs.
+    - Keep tables as standalone chunks.
+    - Extract images as standalone chunks (base64 content + image metadata).
     """
 
     def __init__(self, min_chunk_length: int = 30):
@@ -20,92 +29,191 @@ class DocxParser:
         filename = path.name
 
         segments = self._extract_segments(doc)
-        result = []
+        result: List[DocumentChunk] = []
         chunk_index = 0
 
-        for seg_type, heading, content in segments:
-            if len(content.strip()) < self.min_chunk_length:
-                continue
-            result.append(DocumentChunk.create(
-                content=content.strip(),
-                metadata={
+        for seg in segments:
+            seg_type = seg[0]
+            heading = seg[1]
+            content = seg[2]
+            extra = seg[3] if len(seg) > 3 else {}
+
+            if seg_type == "image":
+                metadata = {
                     "source": filename,
                     "file_type": "docx",
                     "chunk_index": chunk_index,
                     "heading": heading,
-                    "segment_type": seg_type,  # "text" 或 "table"
+                    "segment_type": "image",
+                    **extra,
                 }
-            ))
+                result.append(DocumentChunk.create(content=content, metadata=metadata))
+                chunk_index += 1
+                continue
+
+            if len(content.strip()) < self.min_chunk_length:
+                continue
+
+            result.append(
+                DocumentChunk.create(
+                    content=content.strip(),
+                    metadata={
+                        "source": filename,
+                        "file_type": "docx",
+                        "chunk_index": chunk_index,
+                        "heading": heading,
+                        "segment_type": seg_type,
+                    },
+                )
+            )
             chunk_index += 1
 
         return result
 
-    def _extract_segments(self, doc):
+    def _extract_segments(self, doc: Document) -> List[Tuple]:
         """
-        遍历文档所有元素（段落 + 表格），按标题切分。
-        返回 [(seg_type, heading, content), ...]
+        Return segments in source order:
+        - ("text", heading, content)
+        - ("table", heading, content)
+        - ("image", heading, content, extra)
         """
-        segments = []
+        segments: List[Tuple] = []
         current_heading = ""
-        current_buffer = []
+        current_buffer: List[str] = []
+        image_map = self._build_image_map(doc)
 
-        # 要同时辭历段落和表格，需要按 XML 顺序遍历 body
         body = doc.element.body
         for child in body:
-            tag = child.tag.split('}')[-1]  # 取 localname
+            tag = child.tag.split("}")[-1]
 
-            if tag == 'p':  # 段落
-                para_text = child.text_content() if hasattr(child, 'text_content') else ''.join(
-                    t.text or '' for t in child.iter() if t.tag.split('}')[-1] == 't'
-                )
-                style_name = ''
-                pPr = child.find(f'{{{child.nsmap.get("w", "http://schemas.openxmlformats.org/wordprocessingml/2006/main")}}}pPr')
-                if pPr is not None:
-                    pStyle = pPr.find(f'{{{child.nsmap.get("w", "http://schemas.openxmlformats.org/wordprocessingml/2006/main")}}}pStyle')
-                    if pStyle is not None:
-                        style_name = pStyle.get(f'{{{child.nsmap.get("w", "http://schemas.openxmlformats.org/wordprocessingml/2006/main")}}}val', '')
+            if tag == "p":
+                tokens = self._parse_paragraph_tokens(child)
+                style_name = self._get_style_name(child)
+                is_heading = style_name.lower().startswith("heading") or style_name in ["1", "2", "3", "4", "5"]
+                para_text = "".join(v for t, v in tokens if t == "text").strip()
 
-                is_heading = style_name.lower().startswith('heading') or style_name in ['1', '2', '3', '4', '5']
-
-                if is_heading and para_text.strip():
-                    # 保存上一段
+                if is_heading and para_text:
                     if current_buffer:
                         segments.append(("text", current_heading, "\n".join(current_buffer)))
                         current_buffer = []
-                    current_heading = para_text.strip()
-                elif para_text.strip():
-                    current_buffer.append(para_text.strip())
+                    current_heading = para_text
 
-            elif tag == 'tbl':  # 表格
-                # 先保存当前文本 buffer
+                    for token_type, value in tokens:
+                        if token_type != "image":
+                            continue
+                        if value not in image_map:
+                            continue
+                        img_bytes, content_type = image_map[value]
+                        segments.append(self._make_image_chunk(current_heading, img_bytes, content_type, value))
+                    continue
+
+                para_text_buffer = ""
+                for token_type, value in tokens:
+                    if token_type == "text":
+                        para_text_buffer += value
+                        continue
+
+                    if para_text_buffer.strip():
+                        current_buffer.append(para_text_buffer.strip())
+                        para_text_buffer = ""
+
+                    if value in image_map:
+                        if current_buffer:
+                            segments.append(("text", current_heading, "\n".join(current_buffer)))
+                            current_buffer = []
+                        img_bytes, content_type = image_map[value]
+                        segments.append(self._make_image_chunk(current_heading, img_bytes, content_type, value))
+
+                if para_text_buffer.strip():
+                    current_buffer.append(para_text_buffer.strip())
+
+            elif tag == "tbl":
                 if current_buffer:
                     segments.append(("text", current_heading, "\n".join(current_buffer)))
                     current_buffer = []
-                # 提取表格为独立 chunk
+
                 table_text = self._extract_table(child)
                 if table_text.strip():
                     segments.append(("table", current_heading, table_text))
 
-        # 处理最后剩下的 buffer
+                table_images = self._extract_images_from_element(child, image_map, current_heading)
+                segments.extend(table_images)
+
         if current_buffer:
             segments.append(("text", current_heading, "\n".join(current_buffer)))
 
         return segments
 
+    def _build_image_map(self, doc: Document) -> Dict[str, Tuple[bytes, str]]:
+        image_map: Dict[str, Tuple[bytes, str]] = {}
+        for rid, rel in doc.part.rels.items():
+            if "image" not in rel.reltype:
+                continue
+            try:
+                image_map[rid] = (rel.target_part.blob, rel.target_part.content_type)
+            except Exception:
+                continue
+        return image_map
+
+    def _parse_paragraph_tokens(self, para_elem) -> List[Tuple[str, str]]:
+        """
+        Return tokens in source order:
+        - ("text", text)
+        - ("image", rid)
+        """
+        tokens: List[Tuple[str, str]] = []
+        for elem in para_elem.iter():
+            local = elem.tag.split("}")[-1]
+            if local == "t":
+                tokens.append(("text", elem.text or ""))
+            elif local == "blip":
+                embed = elem.get(f"{{{R_NS}}}embed")
+                if embed:
+                    tokens.append(("image", embed))
+        return tokens
+
+    def _extract_images_from_element(self, element, image_map: Dict[str, Tuple[bytes, str]], heading: str) -> List[Tuple]:
+        image_segments: List[Tuple] = []
+        for elem in element.iter():
+            if elem.tag.split("}")[-1] != "blip":
+                continue
+            embed = elem.get(f"{{{R_NS}}}embed")
+            if not embed or embed not in image_map:
+                continue
+            img_bytes, content_type = image_map[embed]
+            image_segments.append(self._make_image_chunk(heading, img_bytes, content_type, embed))
+        return image_segments
+
+    def _make_image_chunk(self, heading: str, img_bytes: bytes, content_type: str, rid: str) -> Tuple:
+        ext = content_type.split("/")[-1].replace("jpeg", "jpg")
+        b64 = base64.b64encode(img_bytes).decode("utf-8")
+        img_hash = hashlib.md5(img_bytes).hexdigest()[:8]
+        content = f"[IMAGE:{ext}]\n{b64}"
+        extra = {
+            "image_format": ext,
+            "image_size_bytes": len(img_bytes),
+            "image_hash": img_hash,
+            "image_rid": rid,
+        }
+        return ("image", heading, content, extra)
+
+    def _get_style_name(self, para_elem) -> str:
+        ns = para_elem.nsmap.get("w", W_NS)
+        ppr = para_elem.find(f"{{{ns}}}pPr")
+        if ppr is None:
+            return ""
+        pstyle = ppr.find(f"{{{ns}}}pStyle")
+        if pstyle is None:
+            return ""
+        return pstyle.get(f"{{{ns}}}val", "")
+
     def _extract_table(self, tbl_element) -> str:
-        """
-        将 Word 表格转为 Markdown 风格的文本。
-        与其将表格丢弃，不如按行拼接成可读文本。
-        """
-        rows = []
-        w_ns = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
-        for tr in tbl_element.findall(f'{{{w_ns}}}tr'):
-            cells = []
-            for tc in tr.findall(f'{{{w_ns}}}tc'):
-                cell_text = ''.join(
-                    t.text or '' for t in tc.iter() if t.tag == f'{{{w_ns}}}t'
-                ).strip()
+        rows: List[str] = []
+        for tr in tbl_element.findall(f"{{{W_NS}}}tr"):
+            cells: List[str] = []
+            for tc in tr.findall(f"{{{W_NS}}}tc"):
+                cell_text = "".join(t.text or "" for t in tc.iter() if t.tag == f"{{{W_NS}}}t").strip()
                 cells.append(cell_text)
-            if any(cells):  # 过滤全空行
-                rows.append(' | '.join(cells))
+            if any(cells):
+                rows.append(" | ".join(cells))
         return "[TABLE]\n" + "\n".join(rows)
